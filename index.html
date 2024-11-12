@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pose Estimation with Feedback</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@1.3.1/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/pose@0.8/dist/teachablemachine-pose.min.js"></script>
+    <style>
+        .switch {
+            display: inline-block;
+            width: 60px;
+            height: 34px;
+            position: relative;
+        }
+        .switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+        .slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #ccc;
+            transition: .4s;
+            border-radius: 34px;
+        }
+        .slider:before {
+            position: absolute;
+            content: "";
+            height: 26px;
+            width: 26px;
+            left: 4px;
+            bottom: 4px;
+            background-color: white;
+            transition: .4s;
+            border-radius: 50%;
+        }
+        input:checked + .slider {
+            background-color: #2196F3;
+        }
+        input:checked + .slider:before {
+            transform: translateX(26px);
+        }
+    </style>
+</head>
+<body class="flex flex-col items-center justify-center min-h-screen bg-gray-100">
+    <div class="text-2xl font-semibold text-gray-700 mb-4">Pose Estimation</div>
+    
+    <div id="loading" class="mt-4 text-gray-700 hidden">Loading...</div>
+    <div class="mt-6">
+        <canvas id="canvas" class="border border-gray-400 rounded"></canvas>
+    </div>
+    <div id="label-container" class="mt-4 text-gray-700"></div>
+
+    <!-- Toggle Switches Container -->
+    <div class="flex justify-center mt-4 space-x-4">
+        <!-- Audio Toggle Switch -->
+        <label class="flex items-center">
+            <span class="mr-2 text-gray-700">Audio Feedback:</span>
+            <div class="switch">
+                <input type="checkbox" id="audioToggle" checked>
+                <span class="slider"></span>
+            </div>
+        </label>
+
+        <!-- Camera Toggle Switch -->
+        <label class="flex items-center">
+            <span class="mr-2 text-gray-700">Camera:</span>
+            <div class="switch">
+                <input type="checkbox" id="cameraToggle" onclick="toggleWebcam()">
+                <span class="slider"></span>
+            </div>
+        </label>
+    </div>
+
+    <!-- Audio elements for feedback -->
+    <audio id="correctCurl1" src="audio/correct_feedback_1.mp3"></audio>
+    <audio id="correctCurl2" src="audio/correct_feedback_2.mp3"></audio>
+    <audio id="correctCurl3" src="audio/correct_feedback_3.mp3"></audio>
+    <audio id="incorrectCurl1" src="audio/incorrect_feedback_1.mp3"></audio>
+    <audio id="incorrectCurl2" src="audio/incorrect_feedback_2.mp3"></audio>
+    <audio id="incorrectCurl3" src="audio/incorrect_feedback_3.mp3"></audio>
+
+
+    <script type="text/javascript">
+        const URL = "./my_model/";
+        let model, webcam, ctx, labelContainer, maxPredictions;
+        let isWebcamActive = false;
+        let isPlaying = false;  
+        let lastPlayedLabel = "";  
+        let audioEnabled = true; // Track if audio feedback is enabled
+
+        async function init() {
+            try {
+                const modelURL = URL + "model.json";
+                const metadataURL = URL + "metadata.json";
+
+                model = await tmPose.load(modelURL, metadataURL);
+                maxPredictions = model.getTotalClasses();
+
+                const size = 400;
+                const flip = true;
+                webcam = new tmPose.Webcam(size, size, flip);
+                await webcam.setup();
+                await webcam.play();
+                window.requestAnimationFrame(loop);
+
+                const canvas = document.getElementById("canvas");
+                canvas.width = size; canvas.height = size;
+                ctx = canvas.getContext("2d");
+                labelContainer = document.getElementById("label-container");
+                labelContainer.innerHTML = "";
+                for (let i = 0; i < maxPredictions; i++) {
+                    labelContainer.appendChild(document.createElement("div"));
+                }
+
+                document.getElementById("loading").classList.add("hidden");
+                isWebcamActive = true;
+            } catch (error) {
+                console.error("Error initializing webcam:", error);
+                alert("Error accessing the webcam. Please check your camera settings.");
+                document.getElementById("loading").classList.add("hidden");
+            }
+        }
+
+        function toggleWebcam() {
+            const cameraToggle = document.getElementById("cameraToggle");
+            isWebcamActive = cameraToggle.checked;
+            if (isWebcamActive) {
+                document.getElementById("loading").classList.remove("hidden");
+                init();
+            } else {
+                if (webcam) webcam.stop();
+                document.getElementById("loading").classList.add("hidden");
+            }
+        }
+
+        document.getElementById("audioToggle").addEventListener("change", function() {
+            audioEnabled = this.checked; // Update audioEnabled state
+        });
+
+        async function loop() {
+            if (isWebcamActive) {
+                webcam.update();
+                await predict();
+                window.requestAnimationFrame(loop);
+            }
+        }
+
+        async function predict() {
+            const { pose, posenetOutput } = await model.estimatePose(webcam.canvas);
+            const prediction = await model.predict(posenetOutput);
+
+            let highestPrediction = prediction.reduce((best, current) =>
+                current.probability > best.probability ? current : best
+            );
+            const className = highestPrediction.className;
+
+            for (let i = 0; i < maxPredictions; i++) {
+                const classPrediction =
+                    `${prediction[i].className}: ${prediction[i].probability.toFixed(2)}`;
+                labelContainer.childNodes[i].innerHTML = classPrediction;
+            }
+
+            // Only play new audio if the detected label has changed, and the audio is enabled
+            if (audioEnabled && className !== lastPlayedLabel && !isPlaying) {
+                lastPlayedLabel = className;  // Update last played label
+                playFeedback(className);
+            }
+
+            drawPose(pose, className);
+        }
+
+        function playFeedback(className) {
+            isPlaying = true;
+
+            let audioIds;
+            if (className === "Correct Curl") {
+                audioIds = ["correctCurl1", "correctCurl2", "correctCurl3"];
+            } else if (className === "Incorrect Curl") {
+                audioIds = ["incorrectCurl1", "incorrectCurl2", "incorrectCurl3"];
+            }
+
+            if (audioIds) {
+                const audioId = audioIds[Math.floor(Math.random() * audioIds.length)];
+                const audioElement = document.getElementById(audioId);
+
+                audioElement.play()
+                    .then(() => {
+                        audioElement.onended = () => {
+                            isPlaying = false;
+                            setTimeout(() => {
+                                lastPlayedLabel = "";  // Allow a new feedback after 5 seconds
+                            }, 5000);
+                        };
+                    })
+                    .catch(error => {
+                        console.log("Audio playback error:", error);
+                        isPlaying = false;
+                    });
+            }
+        }
+
+        function drawPose(pose, className) {
+            if (webcam.canvas) {
+                ctx.drawImage(webcam.canvas, 0, 0);
+
+                if (pose) {
+                    const minPartConfidence = 0.5;
+                    tmPose.drawKeypoints(pose.keypoints, minPartConfidence, ctx);
+                    tmPose.drawSkeleton(pose.keypoints, minPartConfidence, ctx);
+
+                    const margin = 20;
+                    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+                    pose.keypoints.forEach(point => {
+                        if (point.score >= minPartConfidence) {
+                            minX = Math.min(minX, point.position.x);
+                            minY = Math.min(minY, point.position.y);
+                            maxX = Math.max(maxX, point.position.x);
+                            maxY = Math.max(maxY, point.position.y);
+                        }
+                    });
+
+                    minX = Math.max(0, minX - margin);
+                    minY = Math.max(0, minY - margin);
+                    maxX = Math.min(webcam.canvas.width, maxX + margin);
+                    maxY = Math.min(webcam.canvas.height, maxY + margin);
+
+                    ctx.strokeStyle = "red";
+                    ctx.lineWidth = 2;
+                    ctx.strokeRect(minX, minY, maxX - minX, maxY - minY);
+
+                    ctx.fillStyle = "red";
+                    ctx.font = "16px Arial";
+                    ctx.fillText(className, minX, minY > 10 ? minY - 5 : 10);
+                }
+            }
+        }
+    </script>
+</body>
+</html>
